@@ -1,0 +1,12 @@
+[package]
+name = "coursera_crypto"
+version = "0.1.0"
+authors = ["Nam Chu Hoai <nambrot@googlemail.com>"]
+edition = "2018"
+
+[dependencies]
+sha2 = "0.8.0"
+hyper = "0.12"
+data-encoding = "2.1.2"
+futures = "0.1.25"
+tokio = "0.1.15"

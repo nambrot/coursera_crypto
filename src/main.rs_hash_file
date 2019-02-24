@@ -1,0 +1,39 @@
+extern crate sha2;
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::prelude::*;
+use std::{fmt::Write, num::ParseIntError};
+
+pub fn encode_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        write!(&mut s, "{:02x}", b);
+    }
+    s
+}
+
+fn read_file(file_name: &str) -> Vec<u8> {
+    let f = File::open(file_name);
+    let mut buffer = Vec::new();
+
+    // read the whole file
+    f.unwrap().read_to_end(&mut buffer);
+    buffer
+}
+
+fn hash_file(file_contents: &Vec<u8>) -> Vec<u8> {
+    file_contents
+        .chunks(1024)
+        .rev()
+        .fold(Vec::new(), |current_hash, chunk| {
+            sha2::Sha256::digest(&[chunk, &current_hash].concat()[..]).to_vec()
+        })
+}
+
+fn main() {
+    let file_name = "/Users/nambrot/Downloads/6.1.intro.mp4_download";
+    let file_contents = read_file(&file_name);
+    let result: Vec<u8> = hash_file(&file_contents);
+
+    println!("The hash of {} is {}", file_name, encode_hex(&result));
+}
