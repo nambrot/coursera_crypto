@@ -45,87 +45,59 @@ struct Guess {
     request: Request<Body>,
 }
 
-// fn cyphertext_for_guess_mut(
+// Sets the bytes in the block after the guess position to the padding length
+fn set_padding_with_existing_plaintext(plaintext: &[u8], base: &mut [u8], padding_length: usize) {
+    let end = padding_length - 1;
+    base[0..end]
+        .iter_mut()
+        .zip(plaintext[0..end].iter())
+        .for_each(|(original_byte, plaintext_byte)| {
+            *original_byte = *original_byte ^ plaintext_byte ^ padding_length as u8
+        });
+}
+
+// Set the preceding bytes to the guess to reduce the chance of accidentally
+// having a "wrong" guess result in a correct padding, especially for the original last block
+fn set_prefix_bytes(base: &mut [u8], padding_length: usize) {
+    for prefix_byte in base[(16 + padding_length)..].iter_mut() {
+        *prefix_byte = 0
+    }
+}
+
+// 1 arg is the cyphertext without the guess flip, the second argument is the padding length
+fn get_base_cyphertext(cyphertext: &Vec<u8>, plaintext: &Vec<u8>) -> (Vec<u8>, u8) {
+    let blocks_to_skip = plaintext.len() / 16;
+    let bytes_to_skip = blocks_to_skip * 16;
+    let padding_length = plaintext.len() - bytes_to_skip + 1;
+
+    let mut base = cyphertext[bytes_to_skip..(bytes_to_skip + 32)].to_vec();
+
+    set_padding_with_existing_plaintext(
+        &plaintext[bytes_to_skip..],
+        &mut base[16..],
+        padding_length,
+    );
+    set_prefix_bytes(&mut base, padding_length);
+
+    base.reverse();
+    (base, padding_length as u8)
+}
+
+// fn cyphertext_for_guess(
 //     cyphertext: &Vec<u8>,
 //     plaintext: &Vec<u8>,
 //     guess: u8,
 // ) -> Result<String, String> {
-//     let mut index = 0;
-//     let blocks_to_skip = plaintext.len() / 16;
-//     let bytes_to_skip = blocks_to_skip * 16;
-//     index = index + bytes_to_skip;
+//     let (mut new_cyphertext, padding_length) = get_base_cyphertext(&cyphertext, &plaintext);
 
-//     let mut new_cyphertext = cyphertext[index..(index + 32)].to_vec();
-
-//     let padding_length = (plaintext.len() - bytes_to_skip + 1) as u8;
-//     (&mut new_cyphertext[16..(15 + padding_length as usize)])
-//         .iter_mut()
-//         .zip(plaintext[bytes_to_skip..(bytes_to_skip + padding_length as usize - 1)].iter())
-//         .for_each(|(original_byte, plaintext_byte)| *original_byte = *original_byte ^ plaintext_byte ^ padding_length);
-//     new_cyphertext[15 + padding_length as usize] = new_cyphertext[15 + padding_length as usize] ^ guess ^ padding_length;
-//     for prefix_byte in new_cyphertext[16 + padding_length as usize..].iter_mut() { *prefix_byte = 0 }
-
-//     new_cyphertext.reverse();
+//     let guess_position = new_cyphertext.len() - 16 - padding_length as usize;
+//     new_cyphertext[guess_position] = new_cyphertext[guess_position] ^ guess ^ padding_length;
 
 //     encode_hex(&new_cyphertext).map(|x| x.to_string())
 // }
 
-
-fn cyphertext_for_guess(
-    cyphertext: &Vec<u8>,
-    plaintext: &Vec<u8>,
-    guess: u8,
-) -> Result<String, String> {
-    let blocks_to_skip = plaintext.len() / 16;
-    let bytes_to_skip = blocks_to_skip * 16;
-    let padding_length = (plaintext.len() - bytes_to_skip + 1) as u8;
-
-    let postfix = cyphertext
-        .iter()
-        .skip(blocks_to_skip * 16)
-        .take(16)
-        .map(|x| x + 0)
-        .collect();
-
-    let chars_to_overwrite: Vec<u8> = cyphertext
-        .iter()
-        .skip(blocks_to_skip * 16)
-        .skip(16)
-        .take(padding_length as usize - 1)
-        .map(|x| x + 0)
-        .collect();
-    let char_to_replace = cyphertext[blocks_to_skip * 16 + 15 + padding_length as usize];
-    let old_cypertext = cyphertext
-        .iter()
-        .skip(blocks_to_skip * 16)
-        .skip((padding_length as usize) + 16)
-        .take(16 - padding_length as usize)
-        .map(|_x| 0)
-        .collect::<Vec<u8>>();
-
-    let mut cyphertext = [
-        postfix,
-        plaintext
-            .iter()
-            .skip(blocks_to_skip * 16)
-            .zip(chars_to_overwrite.iter())
-            .map(|(plain_text_char, cyphertext_char)| {
-                plain_text_char ^ cyphertext_char ^ padding_length
-            })
-            .collect(),
-        vec![char_to_replace ^ guess ^ padding_length],
-        old_cypertext,
-    ]
-    .concat();
-
-    cyphertext.reverse();
-    encode_hex(&cyphertext).map(|x| x.to_string())
-}
-
-fn construct_guess(cyphertext: &Vec<u8>, plaintext: &Vec<u8>, guess: u8) -> Result<Guess, String> {
-    let guess_cyphertext = cyphertext_for_guess(&cyphertext, &plaintext, guess)?;
-
-    let url = ("http://crypto-class.appspot.com/po?er=".to_string() + &guess_cyphertext)
+fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String>{
+    let url = ("http://crypto-class.appspot.com/po?er=".to_string() + cyphertext)
         .parse::<Uri>()
         .map_err(|_| "Couldn't produce url for guess".to_string())?;
 
@@ -139,10 +111,32 @@ fn construct_guess(cyphertext: &Vec<u8>, plaintext: &Vec<u8>, guess: u8) -> Resu
     })
 }
 
+// fn construct_guess(cyphertext: &Vec<u8>, plaintext: &Vec<u8>, guess: u8) -> Result<Guess, String> {
+//     let guess_cyphertext = cyphertext_for_guess(&cyphertext, &plaintext, guess)?;
+//     construct_guess_request(&guess_cyphertext, guess)
+// }
+
+fn construct_guess_from_base(base: &mut Vec<u8>, padding_length: u8, guess: u8) -> Result<Guess, String>{
+    let guess_position = base.len() - 16 - padding_length as usize;
+    // Flip the guess byte
+    base[guess_position] = base[guess_position] ^ guess ^ padding_length;
+    let cyphertext = encode_hex(&base)?;
+    let guess_request = construct_guess_request(&cyphertext, guess)?;
+    // Flip the guess byte back
+    base[guess_position] = base[guess_position] ^ guess ^ padding_length;
+    Ok(guess_request)
+}
+
 fn decode_next_byte(cyphertext: &Vec<u8>, plaintext: &Vec<u8>) -> Result<u8, String> {
     let client = Client::new();
+
+    //  let guesses = (0..=255)
+    //     .map(|guess| construct_guess(&cyphertext, &plaintext, guess))
+    //     .collect::<Result<Vec<Guess>, String>>()?;
+    let (mut base_cyphertext, padding_length) = get_base_cyphertext(&cyphertext, &plaintext);
+
     let guesses = (0..=255)
-        .map(|guess| construct_guess(&cyphertext, &plaintext, guess))
+        .map(|guess| construct_guess_from_base(&mut base_cyphertext, padding_length, guess))
         .collect::<Result<Vec<Guess>, String>>()?;
 
     let my_stream = stream::iter_ok(guesses)
