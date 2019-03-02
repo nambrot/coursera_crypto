@@ -1,6 +1,7 @@
 extern crate hyper;
 extern crate tokio;
 use futures::stream;
+use hyper::client::HttpConnector;
 use hyper::rt::{Future, Stream};
 use hyper::{Body, Client, Request, StatusCode, Uri};
 
@@ -96,7 +97,7 @@ fn get_base_cyphertext(cyphertext: &Vec<u8>, plaintext: &Vec<u8>) -> (Vec<u8>, u
 //     encode_hex(&new_cyphertext).map(|x| x.to_string())
 // }
 
-fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String>{
+fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String> {
     let url = ("http://crypto-class.appspot.com/po?er=".to_string() + cyphertext)
         .parse::<Uri>()
         .map_err(|_| "Couldn't produce url for guess".to_string())?;
@@ -116,7 +117,11 @@ fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String>
 //     construct_guess_request(&guess_cyphertext, guess)
 // }
 
-fn construct_guess_from_base(base: &mut Vec<u8>, padding_length: u8, guess: u8) -> Result<Guess, String>{
+fn construct_guess_from_base(
+    base: &mut Vec<u8>,
+    padding_length: u8,
+    guess: u8,
+) -> Result<Guess, String> {
     let guess_position = base.len() - 16 - padding_length as usize;
     // Flip the guess byte
     base[guess_position] = base[guess_position] ^ guess ^ padding_length;
@@ -127,43 +132,63 @@ fn construct_guess_from_base(base: &mut Vec<u8>, padding_length: u8, guess: u8) 
     Ok(guess_request)
 }
 
-fn decode_next_byte(cyphertext: &Vec<u8>, plaintext: &Vec<u8>) -> Result<u8, String> {
-    let client = Client::new();
+fn create_request(
+    guess: Guess,
+    client: &Client<HttpConnector>,
+) -> impl Future<Item = Option<u8>, Error = String> {
+    let copied_guess = guess.guess;
+    client
+        .request(guess.request)
+        .map(move |res| match res.status() {
+            StatusCode::NOT_FOUND => Some(copied_guess),
+            _ => None,
+        })
+        .map_err(|_| "asd".to_string())
+}
 
-    //  let guesses = (0..=255)
-    //     .map(|guess| construct_guess(&cyphertext, &plaintext, guess))
-    //     .collect::<Result<Vec<Guess>, String>>()?;
+fn produce_guesses(
+    cyphertext: &Vec<u8>,
+    plaintext: &Vec<u8>,
+) -> impl Future<Item = Vec<Guess>, Error = String> {
     let (mut base_cyphertext, padding_length) = get_base_cyphertext(&cyphertext, &plaintext);
 
     let guesses = (0..=255)
         .map(|guess| construct_guess_from_base(&mut base_cyphertext, padding_length, guess))
-        .collect::<Result<Vec<Guess>, String>>()?;
+        .collect::<Result<Vec<Guess>, String>>();
 
-    let my_stream = stream::iter_ok(guesses)
-        .map(move |guess| {
-            let copied_guess = guess.guess;
-            client
-                .request(guess.request)
-                .map(move |res| match res.status() {
-                    StatusCode::NOT_FOUND => Some(copied_guess),
-                    _ => None,
-                })
-        })
-        .buffer_unordered(40);
+    futures::future::result(guesses)
+}
 
-    let work = my_stream
+fn execute_guesses(guesses: Vec<Guess>) -> impl Future<Item = Vec<u8>, Error = String> {
+    let client = Client::new();
+
+    stream::iter_ok(guesses)
+        .map(move |guess| create_request(guess, &client))
+        .buffer_unordered(40)
         .filter_map(|x| x)
         .take(1)
         .collect()
-        .map_err(|e| panic!("Error making request: {}", e));
+        .map_err(|e| panic!("Error making request: {}", e))
+}
 
-    let mut runtime = tokio::runtime::Runtime::new().expect("Unable to create a runtime");
-    let result = runtime.block_on(work);
-    result.and_then(|x| {
-        x.first()
-            .map(|x| x.clone())
-            .ok_or("Couldn't guess byte".to_string())
-    })
+fn get_first_result<T: Clone>(vector: Vec<T>) -> impl Future<Item = T, Error= String> {
+    let result = vector
+        .first()
+        .cloned()
+        .ok_or("Couldn't get byte".to_string());
+    futures::future::result(result)
+}
+
+fn decode_next_byte(
+    cyphertext: &Vec<u8>,
+    plaintext: &Vec<u8>,
+) -> impl Future<Item = u8, Error = String> {
+    //  let guesses = (0..=255)
+    //     .map(|guess| construct_guess(&cyphertext, &plaintext, guess))
+    //     .collect::<Result<Vec<Guess>, String>>()?;
+    produce_guesses(cyphertext, plaintext)
+        .and_then(execute_guesses)
+        .and_then(get_first_result)
 }
 
 pub fn attack(target_string: &str) -> Result<&str, String> {
@@ -177,7 +202,11 @@ pub fn attack(target_string: &str) -> Result<&str, String> {
     // at this point, we have both plaintext and cyphertext as reversed bytes vectors
     // call decode_next_byte repeatedly
     while plaintext.len() < cyphertext.len() - 16 {
-        let next_byte = decode_next_byte(&cyphertext, &plaintext)?;
+        let next_byte_work = decode_next_byte(&cyphertext, &plaintext);
+
+        let mut runtime = tokio::runtime::Runtime::new().expect("Unable to create a runtime");
+        let next_byte = runtime.block_on(next_byte_work)?;
+
         plaintext.push(next_byte);
         println!(
             "Current plaintext: {}",
