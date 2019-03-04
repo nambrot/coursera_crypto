@@ -67,35 +67,16 @@ fn set_prefix_bytes(base: &mut [u8], padding_length: usize) {
 
 // 1 arg is the cyphertext without the guess flip, the second argument is the padding length
 fn get_base_cyphertext(cyphertext: &Vec<u8>, plaintext: &Vec<u8>) -> (Vec<u8>, u8) {
-    let blocks_to_skip = plaintext.len() / 16;
-    let bytes_to_skip = blocks_to_skip * 16;
-    let padding_length = plaintext.len() - bytes_to_skip + 1;
+    let padding_length = plaintext.len() + 1;
 
-    let mut base = cyphertext[bytes_to_skip..(bytes_to_skip + 32)].to_vec();
+    let mut base = cyphertext.clone();
 
-    set_padding_with_existing_plaintext(
-        &plaintext[bytes_to_skip..],
-        &mut base[16..],
-        padding_length,
-    );
+    set_padding_with_existing_plaintext(&plaintext[0..], &mut base[16..], padding_length);
     set_prefix_bytes(&mut base, padding_length);
 
     base.reverse();
     (base, padding_length as u8)
 }
-
-// fn cyphertext_for_guess(
-//     cyphertext: &Vec<u8>,
-//     plaintext: &Vec<u8>,
-//     guess: u8,
-// ) -> Result<String, String> {
-//     let (mut new_cyphertext, padding_length) = get_base_cyphertext(&cyphertext, &plaintext);
-
-//     let guess_position = new_cyphertext.len() - 16 - padding_length as usize;
-//     new_cyphertext[guess_position] = new_cyphertext[guess_position] ^ guess ^ padding_length;
-
-//     encode_hex(&new_cyphertext).map(|x| x.to_string())
-// }
 
 fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String> {
     let url = ("http://crypto-class.appspot.com/po?er=".to_string() + cyphertext)
@@ -111,11 +92,6 @@ fn construct_guess_request(cyphertext: &str, guess: u8) -> Result<Guess, String>
         request: request,
     })
 }
-
-// fn construct_guess(cyphertext: &Vec<u8>, plaintext: &Vec<u8>, guess: u8) -> Result<Guess, String> {
-//     let guess_cyphertext = cyphertext_for_guess(&cyphertext, &plaintext, guess)?;
-//     construct_guess_request(&guess_cyphertext, guess)
-// }
 
 fn construct_guess_from_base(
     base: &mut Vec<u8>,
@@ -143,7 +119,7 @@ fn create_request(
             StatusCode::NOT_FOUND => Some(copied_guess),
             _ => None,
         })
-        .map_err(|_| "asd".to_string())
+        .map_err(|_| "Request failed".to_string())
 }
 
 fn produce_guesses(
@@ -179,66 +155,43 @@ fn get_first_result<T: Clone>(vector: Vec<T>) -> impl Future<Item = T, Error = S
     futures::future::result(result)
 }
 
-fn decode_next_byte(
-    cyphertext: &Vec<u8>,
-    plaintext: &Vec<u8>,
-) -> impl Future<Item = u8, Error = String> {
-    //  let guesses = (0..=255)
-    //     .map(|guess| construct_guess(&cyphertext, &plaintext, guess))
-    //     .collect::<Result<Vec<Guess>, String>>()?;
-    produce_guesses(cyphertext, plaintext)
-        .and_then(execute_guesses)
-        .and_then(get_first_result)
-}
-
 fn decode_block(cyphertext: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = String> {
-    let c = cyphertext.clone();
-    let x = futures::future::loop_fn(vec![], move |plaintext| {
-        let p = plaintext.clone();
-
-        if p.len() < c.len() - 16 {
-            futures::future::Either::A(decode_next_byte(&cyphertext, &p).map(move |next_byte| {
+    futures::stream::iter_ok(0..16).fold(vec![], move |plaintext, _index| {
+        produce_guesses(&cyphertext, &plaintext)
+            .and_then(execute_guesses)
+            .and_then(get_first_result)
+            .map(move |next_byte| {
                 let mut new_plaintext = plaintext.clone();
                 new_plaintext.push(next_byte);
-                futures::future::Loop::Continue(new_plaintext)
-            }))
-        } else {
-            futures::future::Either::B(futures::future::ok(futures::future::Loop::Break(p)))
-        }
-    });
-    x
+                new_plaintext
+            })
+    })
 }
 
 fn work(cyphertext: &Vec<u8>) -> impl Future<Item = Vec<u8>, Error = String> {
-    let cyphertexts = cyphertext
+    let cyphertext_blocks = cyphertext
         .windows(32)
         .step_by(16)
         .map(|x| x.to_vec())
         .collect::<Vec<Vec<u8>>>();
-    stream::iter_ok(cyphertexts)
+    stream::iter_ok(cyphertext_blocks)
         .map(|c| decode_block(c))
         .buffered(10)
         .collect()
         .map(|plaintexts| plaintexts.into_iter().flatten().collect())
 }
 
-pub fn attack(target_string: &str) -> Result<&str, String> {
+pub fn attack(target_string: &str) -> Result<String, String> {
     let mut cyphertext = decode_hex(target_string)?;
-    println!("The hash to crack is {}", target_string);
+    println!("The cyphertext to crack is {}", target_string);
 
-    // cyphertext.truncate(cyphertext.len() - 16);
     cyphertext.reverse();
 
     let decode_work = work(&cyphertext);
     let mut runtime = tokio::runtime::Runtime::new().expect("Unable to create a runtime");
     let plaintext = runtime.block_on(decode_work)?;
-    let x = String::from_utf8(plaintext.iter().rev().map(|x| x + 0).collect()).map_err(|_| "a")?;
-    let decoded_plaintext = x.trim();
-    println!("Decoded plaintext is: {}", &decoded_plaintext);
-    assert_eq!(
-        decoded_plaintext,
-        "The Magic Words are Squeamish Ossifrage".to_string()
-    );
 
-    Ok("Done")
+    String::from_utf8(plaintext.iter().rev().map(|x| x + 0).collect())
+        .map_err(|_| "Couldn't decode result".to_string())
+        .map(|x| x.trim().to_string())
 }
