@@ -171,7 +171,7 @@ fn execute_guesses(guesses: Vec<Guess>) -> impl Future<Item = Vec<u8>, Error = S
         .map_err(|e| panic!("Error making request: {}", e))
 }
 
-fn get_first_result<T: Clone>(vector: Vec<T>) -> impl Future<Item = T, Error= String> {
+fn get_first_result<T: Clone>(vector: Vec<T>) -> impl Future<Item = T, Error = String> {
     let result = vector
         .first()
         .cloned()
@@ -191,33 +191,52 @@ fn decode_next_byte(
         .and_then(get_first_result)
 }
 
+fn decode_block(cyphertext: Vec<u8>) -> impl Future<Item = Vec<u8>, Error = String> {
+    let c = cyphertext.clone();
+    let x = futures::future::loop_fn(vec![], move |plaintext| {
+        let p = plaintext.clone();
+
+        if p.len() < c.len() - 16 {
+            futures::future::Either::A(decode_next_byte(&cyphertext, &p).map(move |next_byte| {
+                let mut new_plaintext = plaintext.clone();
+                new_plaintext.push(next_byte);
+                futures::future::Loop::Continue(new_plaintext)
+            }))
+        } else {
+            futures::future::Either::B(futures::future::ok(futures::future::Loop::Break(p)))
+        }
+    });
+    x
+}
+
+fn work(cyphertext: &Vec<u8>) -> impl Future<Item = Vec<u8>, Error = String> {
+    let cyphertexts = cyphertext
+        .windows(32)
+        .step_by(16)
+        .map(|x| x.to_vec())
+        .collect::<Vec<Vec<u8>>>();
+    stream::iter_ok(cyphertexts)
+        .map(|c| decode_block(c))
+        .buffered(10)
+        .collect()
+        .map(|plaintexts| plaintexts.into_iter().flatten().collect())
+}
+
 pub fn attack(target_string: &str) -> Result<&str, String> {
     let mut cyphertext = decode_hex(target_string)?;
     println!("The hash to crack is {}", target_string);
 
     // cyphertext.truncate(cyphertext.len() - 16);
     cyphertext.reverse();
-    let mut plaintext: Vec<u8> = vec![];
 
-    // at this point, we have both plaintext and cyphertext as reversed bytes vectors
-    // call decode_next_byte repeatedly
-    while plaintext.len() < cyphertext.len() - 16 {
-        let next_byte_work = decode_next_byte(&cyphertext, &plaintext);
-
-        let mut runtime = tokio::runtime::Runtime::new().expect("Unable to create a runtime");
-        let next_byte = runtime.block_on(next_byte_work)?;
-
-        plaintext.push(next_byte);
-        println!(
-            "Current plaintext: {}",
-            String::from_utf8(plaintext.iter().rev().map(|x| x + 0).collect()).unwrap()
-        );
-    }
-
+    let decode_work = work(&cyphertext);
+    let mut runtime = tokio::runtime::Runtime::new().expect("Unable to create a runtime");
+    let plaintext = runtime.block_on(decode_work)?;
+    let x = String::from_utf8(plaintext.iter().rev().map(|x| x + 0).collect()).map_err(|_| "a")?;
+    let decoded_plaintext = x.trim();
+    println!("Decoded plaintext is: {}", &decoded_plaintext);
     assert_eq!(
-        String::from_utf8(plaintext.iter().rev().map(|x| x + 0).collect())
-            .unwrap()
-            .trim(),
+        decoded_plaintext,
         "The Magic Words are Squeamish Ossifrage".to_string()
     );
 
